@@ -908,21 +908,35 @@ class GRPOTrainer(BaseTrainer):
             
             if compute_jsd:
                 with torch.no_grad():
-                    p = torch.softmax(logits, dim=-1)
-                    n = p.shape[1]
-                    p_i = p.T.unsqueeze(1)
-                    p_j = p.T.unsqueeze(0)
-                    m = (p_i + p_j) / 2
+                    probs = torch.softmax(logits, dim=-1)  # (B_chunk, T_comp, V)
+                    comp_mask_chunk = attention_mask_batch[:, -logits_to_keep:]  # (B_chunk, T_comp)
+                    jsd_vals = []
+                    for b in range(probs.size(0)):
+                        t_mask = comp_mask_chunk[b].bool()
+                        p_seq = probs[b, t_mask]  # (T_valid, V)
+                        # If fewer than 2 valid steps, JSD is 0
+                        if p_seq.size(0) < 2:
+                            jsd_vals.append(torch.tensor(0.0, device=probs.device))
+                            continue
 
-                    eps = 1e-10
-                    kl_pm = (p_i * (torch.log(p_i + eps) - torch.log(m + eps))).sum(dim=-1)
-                    kl_qm = (p_j * (torch.log(p_j + eps) - torch.log(m + eps))).sum(dim=-1)
-                    js_matrix = (kl_pm + kl_qm) / 2
+                        # Compute pairwise JSD across timesteps (sum over vocab)
+                        # p_T: (T_valid, V)
+                        p_T = p_seq  # already (T_valid, V)
+                        p_i = p_T.unsqueeze(1)  # (T_valid, 1, V)
+                        p_j = p_T.unsqueeze(0)  # (1, T_valid, V)
+                        m = (p_i + p_j) / 2.0
 
-                    mask = torch.triu(torch.ones(n, n, device=p.device), diagonal=1).bool()
-                    js_sum = js_matrix[mask].sum()
+                        eps = 1e-10
+                        kl_pm = (p_i * (torch.log(p_i + eps) - torch.log(m + eps))).sum(dim=-1)  # (T_valid, T_valid)
+                        kl_qm = (p_j * (torch.log(p_j + eps) - torch.log(m + eps))).sum(dim=-1)  # (T_valid, T_valid)
+                        js_matrix = 0.5 * (kl_pm + kl_qm)  # (T_valid, T_valid)
 
-                    all_jsd.append(js_sum / (n * (n - 1) / 2))
+                        n = p_T.size(0)
+                        mask = torch.triu(torch.ones(n, n, device=probs.device, dtype=torch.bool), diagonal=1)
+                        js_mean = js_matrix[mask].mean()
+                        jsd_vals.append(js_mean)
+
+                    all_jsd.append(torch.stack(jsd_vals))
 
         logps = torch.cat(all_logps, dim=0)
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
@@ -1520,6 +1534,25 @@ class GRPOTrainer(BaseTrainer):
             )
 
         with torch.no_grad():
+            # Compute per-sequence pairwise JSD over completion timesteps and attach to inputs
+            _, _, jsd_vals = self._get_per_token_logps_and_entropies(
+                self.model,
+                prompt_completion_ids,
+                attention_mask,
+                logits_to_keep,
+                batch_size=batch_size,
+                compute_jsd=True,
+                num_images=num_images,
+                **forward_kwargs,  # may contain pixel_values, image_grid_thw, pixel_attention_mask, image_sizes
+            )
+            print(f'jsd_vals: {jsd_vals}')
+
+            # Attach to inputs so reward functions receive it via **kwargs
+            for i in range(len(inputs)):
+                inputs[i]["pairwise_jsd"] = float(jsd_vals[i])
+            
+            print('added jsd_vals to inputs')
+
             # If the generation and optimization steps are misaligned—i.e., if generation does not occur at the end of
             # a full optimizer step (when gradient_accumulation_steps is not a multiple of generate_every)—then the
             # samples may come from an earlier version of the model. In that case, we need to track old_per_token_logps
@@ -1531,13 +1564,12 @@ class GRPOTrainer(BaseTrainer):
             if self.args.gradient_accumulation_steps % generate_every != 0 or (
                 self.use_vllm and self.vllm_importance_sampling_correction
             ):
-                old_per_token_logps, _, pairwise_jsd = self._get_per_token_logps_and_entropies(
+                old_per_token_logps, _ = self._get_per_token_logps_and_entropies(
                     self.model,
                     prompt_completion_ids,
                     attention_mask,
                     logits_to_keep,
                     batch_size,
-                    compute_jsd=True,
                     num_images=num_images,
                     **forward_kwargs,  # may contain pixel_values, image_grid_thw, pixel_attention_mask and image_sizes
                 )
