@@ -843,6 +843,7 @@ class GRPOTrainer(BaseTrainer):
         logits_to_keep,
         batch_size=None,
         compute_entropy=False,
+        compute_jsd=False,
         pixel_values=None,
         image_grid_thw=None,
         num_images=None,
@@ -854,6 +855,8 @@ class GRPOTrainer(BaseTrainer):
         batch_size = batch_size or input_ids.size(0)  # Chunk inputs into smaller batches to reduce memory peak
         all_logps = []
         all_entropies = []
+        all_jsd = []
+
         for start in range(0, input_ids.size(0), batch_size):
             input_ids_batch = input_ids[start : start + batch_size]
             attention_mask_batch = attention_mask[start : start + batch_size]
@@ -902,10 +905,29 @@ class GRPOTrainer(BaseTrainer):
                 with torch.no_grad():
                     entropies = entropy_from_logits(logits)
                 all_entropies.append(entropies)
+            
+            if compute_jsd:
+                with torch.no_grad():
+                    p = torch.softmax(logits, dim=-1)
+                    n = p.shape[1]
+                    p_i = p.T.unsqueeze(1)
+                    p_j = p.T.unsqueeze(0)
+                    m = (p_i + p_j) / 2
+
+                    eps = 1e-10
+                    kl_pm = (p_i * (torch.log(p_i + eps) - torch.log(m + eps))).sum(dim=-1)
+                    kl_qm = (p_j * (torch.log(p_j + eps) - torch.log(m + eps))).sum(dim=-1)
+                    js_matrix = (kl_pm + kl_qm) / 2
+
+                    mask = torch.triu(torch.ones(n, n, device=p.device), diagonal=1).bool()
+                    js_sum = js_matrix[mask].sum()
+
+                    all_jsd.append(js_sum / (n * (n - 1) / 2))
 
         logps = torch.cat(all_logps, dim=0)
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
-        return logps, entropies
+        jsd = torch.cat(all_jsd, dim=0) if compute_jsd else None
+        return logps, entropies, jsd
 
     def _fix_param_name_to_vllm(self, name, extra_prefixes: Optional[list[str]] = None):
         extra_prefixes = extra_prefixes or []
@@ -1509,12 +1531,13 @@ class GRPOTrainer(BaseTrainer):
             if self.args.gradient_accumulation_steps % generate_every != 0 or (
                 self.use_vllm and self.vllm_importance_sampling_correction
             ):
-                old_per_token_logps, _ = self._get_per_token_logps_and_entropies(
+                old_per_token_logps, _, pairwise_jsd = self._get_per_token_logps_and_entropies(
                     self.model,
                     prompt_completion_ids,
                     attention_mask,
                     logits_to_keep,
                     batch_size,
+                    compute_jsd=True,
                     num_images=num_images,
                     **forward_kwargs,  # may contain pixel_values, image_grid_thw, pixel_attention_mask and image_sizes
                 )
