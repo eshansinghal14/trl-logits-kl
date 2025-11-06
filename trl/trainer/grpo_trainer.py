@@ -908,56 +908,8 @@ class GRPOTrainer(BaseTrainer):
             
             if compute_jsd:
                 with torch.no_grad():
-                    probs = torch.softmax(logits, dim=-1)  # (B_chunk, T_comp, V)
-                    comp_mask_chunk = attention_mask_batch[:, -logits_to_keep:]  # (B_chunk, T_comp)
-                    jsd_vals = []
-                    batch_size = 50  # Process 50 pairs at a time (tune this based on your memory)
-                    
-                    for b in range(probs.size(0)):
-                        t_mask = comp_mask_chunk[b].bool()
-                        p_seq = probs[b, t_mask]  # (T_valid, V)
-                        
-                        if p_seq.size(0) < 2:
-                            jsd_vals.append(torch.tensor(0.0, device=probs.device))
-                            continue
-                        
-                        T = p_seq.size(0)
-                        
-                        # Generate all upper triangular pairs (i, j) where i < j
-                        pairs = []
-                        for i in range(T):
-                            for j in range(i + 1, T):
-                                pairs.append((i, j))
-                        
-                        # Process pairs in batches
-                        js_values = []
-                        eps = 1e-10
-                        
-                        for start_idx in range(0, len(pairs), batch_size):
-                            end_idx = min(start_idx + batch_size, len(pairs))
-                            batch_pairs = pairs[start_idx:end_idx]
-                            
-                            # Get indices for this batch
-                            i_indices = torch.tensor([p[0] for p in batch_pairs], device=probs.device)
-                            j_indices = torch.tensor([p[1] for p in batch_pairs], device=probs.device)
-                            
-                            # Fetch distributions for this batch
-                            p_i = p_seq[i_indices]  # (batch, V)
-                            p_j = p_seq[j_indices]  # (batch, V)
-                            m = (p_i + p_j) / 2.0
-                            
-                            # Compute JSD for this batch
-                            kl_pm = (p_i * (torch.log(p_i + eps) - torch.log(m + eps))).sum(dim=-1)
-                            kl_qm = (p_j * (torch.log(p_j + eps) - torch.log(m + eps))).sum(dim=-1)
-                            js_batch = 0.5 * (kl_pm + kl_qm)
-                            
-                            js_values.append(js_batch)
-                        
-                        # Average all pairwise JSD values
-                        js_mean = torch.cat(js_values).mean()
-                        jsd_vals.append(js_mean)
-                    
-                    all_jsd.append(torch.stack(jsd_vals))
+                    jsd_vals = jsd_from_logits(logits)
+                all_jsd.append(jsd_vals)
 
         logps = torch.cat(all_logps, dim=0)
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
@@ -1561,7 +1513,7 @@ class GRPOTrainer(BaseTrainer):
                 prompt_completion_ids,
                 attention_mask,
                 logits_to_keep,
-                batch_size=1,
+                batch_size=batch_size,
                 compute_jsd=True,
                 num_images=num_images,
                 **forward_kwargs,  # may contain pixel_values, image_grid_thw, pixel_attention_mask, image_sizes

@@ -1560,6 +1560,46 @@ def entropy_from_logits(logits: torch.Tensor, chunk_size: int = 128) -> torch.Te
     return entropies.reshape(original_shape)
 
 
+def jsd_from_logits(logits: torch.Tensor, n_pair_samples: int = 100) -> torch.Tensor:
+    probs = torch.softmax(logits, dim=-1)  # (B_chunk, T_comp, V)
+    comp_mask_chunk = attention_mask_batch[:, -logits_to_keep:]  # (B_chunk, T_comp)
+
+    jsd_vals = []    
+    for b in range(probs.size(0)):
+        t_mask = comp_mask_chunk[b].bool()
+        p_seq = probs[b, t_mask]  # (T_valid, V)
+        
+        if p_seq.size(0) < 2:
+            jsd_vals.append(torch.tensor(0.0, device=probs.device))
+            continue
+        
+        T = p_seq.size(0)
+        
+        # DIRECTLY sample random pairs
+        i_idx = torch.randint(0, T, (n_pair_samples,), device=probs.device)
+        j_idx = torch.randint(0, T, (n_pair_samples,), device=probs.device)
+        
+        # Ensure i < j
+        mask = i_idx >= j_idx
+        i_idx[mask], j_idx[mask] = j_idx[mask], i_idx[mask]
+        
+        # Remove i == j
+        valid = i_idx != j_idx
+        i_idx = i_idx[valid]
+        j_idx = j_idx[valid]
+        
+        # Compute JSD for sampled pairs
+        p_i = p_seq[i_idx]
+        p_j = p_seq[j_idx]
+        m = (p_i + p_j) / 2.0
+        
+        kl_pm = (p_i * (torch.log(p_i + eps) - torch.log(m + eps))).sum(dim=-1)
+        kl_qm = (p_j * (torch.log(p_j + eps) - torch.log(m + eps))).sum(dim=-1)
+        jsd_vals.append(0.5 * (kl_pm + kl_qm))
+    
+    return torch.stack(jsd_vals)
+
+
 def print_prompt_completions_sample(
     prompts: list,
     completions: list,
