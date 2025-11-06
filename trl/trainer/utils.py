@@ -1560,7 +1560,7 @@ def entropy_from_logits(logits: torch.Tensor, chunk_size: int = 128) -> torch.Te
     return entropies.reshape(original_shape)
 
 
-def jsd_from_logits(logits: torch.Tensor, comp_mask_chunk: torch.Tensor, n_pair_samples: int = 100) -> torch.Tensor:
+def jsd_from_logits(logits: torch.Tensor, comp_mask_chunk: torch.Tensor, n_pair_samples: int = 500) -> torch.Tensor:
     probs = torch.softmax(logits.float(), dim=-1)  # (B_chunk, T_comp, V)
     eps = 1e-10
 
