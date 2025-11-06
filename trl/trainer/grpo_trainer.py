@@ -910,7 +910,7 @@ class GRPOTrainer(BaseTrainer):
             
             if compute_jsd:
                 with torch.no_grad():
-                    jsd_vals = jsd_from_logits(logits)
+                    jsd_vals = jsd_from_logits(logits, attention_mask_batch[:, -logits_to_keep:])
                 all_jsd.append(jsd_vals)
 
         logps = torch.cat(all_logps, dim=0)
