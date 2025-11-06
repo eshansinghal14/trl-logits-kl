@@ -21,6 +21,7 @@ from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
+import time
 
 import datasets
 import torch
@@ -67,6 +68,7 @@ from .utils import (
     disable_dropout_in_model,
     ensure_master_addr_port,
     entropy_from_logits,
+    jsd_from_logits,
     get_config_model_id,
     identity,
     nanmax,
@@ -1508,6 +1510,7 @@ class GRPOTrainer(BaseTrainer):
 
         with torch.no_grad():
             # Compute per-sequence pairwise JSD over completion timesteps and attach to inputs
+            jsd_start_time = time.time()
             _, _, jsd_vals = self._get_per_token_logps_and_entropies(
                 self.model,
                 prompt_completion_ids,
@@ -1522,6 +1525,8 @@ class GRPOTrainer(BaseTrainer):
             # Attach to inputs so reward functions receive it via **kwargs
             for i in range(len(inputs)):
                 inputs[i]["pairwise_jsd"] = float(jsd_vals[i])
+            jsd_end_time = time.time()
+            self._metrics[mode]["completions/jsd_time"].append(jsd_end_time - jsd_start_time)
 
             # If the generation and optimization steps are misaligned—i.e., if generation does not occur at the end of
             # a full optimizer step (when gradient_accumulation_steps is not a multiple of generate_every)—then the
